@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ArbitrageBot.Api/ArbitrageBot.Api.csproj" />
+    <Project Path="src/ArbitrageBot.Application/ArbitrageBot.Application.csproj" />
+    <Project Path="src/ArbitrageBot.Domain/ArbitrageBot.Domain.csproj" />
+    <Project Path="src/ArbitrageBot.Infrastructure/ArbitrageBot.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ArbitrageBot.Application.Tests/ArbitrageBot.Application.Tests.csproj" />
+    <Project Path="tests/ArbitrageBot.Domain.Tests/ArbitrageBot.Domain.Tests.csproj" />
+    <Project Path="tests/ArbitrageBot.Integration.Tests/ArbitrageBot.Integration.Tests.csproj" />
+  </Folder>
+</Solution>

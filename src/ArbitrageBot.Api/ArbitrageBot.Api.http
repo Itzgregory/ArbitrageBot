@@ -1,0 +1,6 @@
+@ArbitrageBot.Api_HostAddress = http://localhost:5223
+
+GET {{ArbitrageBot.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

@@ -1,0 +1,39 @@
+Step one: 
+I decided to go with the structure below
+ArbitrageBot/
+├── src/
+│   ├── ArbitrageBot.Domain/
+│   ├── ArbitrageBot.Infrastructure/
+│   ├── ArbitrageBot.Application/
+│   └── ArbitrageBot.Api/
+├── tests/
+│   ├── ArbitrageBot.Domain.Tests/
+│   ├── ArbitrageBot.Application.Tests/
+│   └── ArbitrageBot.Integration.Tests/
+└── ArbitrageBot.sln
+
+Domain:
+ this will be the innermost layer.
+ it will have no dependencies on anything external
+ not even nuggets or any framework beyond the basic class library
+ the models will be in here (arbitrage opportunities, token pair, arbitrage leg), 
+ it will also contain interfaces, domain logic, state transition
+
+Application:
+  this is where all uses cases will live... the scanner, analyzer, and executor logic stays here
+  it will depend on the domain but then it wont know how any of those interfaces are implemented, 
+  this makes easier for testing and also allows us to swap out implementations if we want to change how we do something without affecting the domain logic
+
+Infrastructure:
+ this is where we will implement the interfaces defined in the domain layer, 
+ this is where we will have our implementations for interacting with the blockchain, 
+ this is where we will have our implementations for interacting with the exchanges, 
+ this is where we will have our implementations for interacting with any external services we need
+ keeping it isolated means nethereum breaking changes can never reach the domain logic
+
+Api: 
+    this is where we will have our web api, 
+    this is where we will have our controllers, 
+    this is where we will have our dtos, 
+    this is where we will have our mappings, 
+    this is where we will have our dependency injection configuration  
