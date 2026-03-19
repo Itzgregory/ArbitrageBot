@@ -9,8 +9,11 @@ public interface IDex
     string Name { get; }
     string RouterAddress { get; }
 
+    // blockNumber is passed in from the worker, the DEX layer
+    // must not fetch it independently as that wastes RPC calls
     Task<PoolReserves> GetReservesAsync(
         TokenPair pair,
+        int blockNumber,
         CancellationToken cancellationToken = default);
 
     Task<decimal> GetSpotPriceAsync(

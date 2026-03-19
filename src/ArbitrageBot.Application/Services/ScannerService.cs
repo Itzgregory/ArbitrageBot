@@ -20,12 +20,12 @@ public sealed class ScannerService
     private readonly ILogger<ScannerService> _logger;
 
     public ScannerService(
-        // the scanner will monitor multiple dexes simultaneously
-        // injecting a collections means that i will add or remove dex implementations in programs.cs without touching the scanner at all
+        // The scanner monitors multiple DEXes simultaneously.
+        // Injecting a collection means we add or remove DEX implementations
+        // in Program.cs without touching the scanner at all.
         IEnumerable<IDex> dexes,
-        // this is the list of pairs to watch...
-        // this comes from configuration
-        // i dont hardcode pairs in scanner... in program.cs i will register from appsettings.json
+        // The list of pairs to watch comes from configuration.
+        // We never hardcode pairs here, Program.cs registers them from appsettings.json.
         IEnumerable<TokenPair> monitoredPairs,
         IOptions<ScannerOptions> options,
         ILogger<ScannerService> logger)
@@ -75,6 +75,7 @@ public sealed class ScannerService
         foreach (var dex in _dexes)
         foreach (var pair in _monitoredPairs)
         {
+            // Pass currentBlockNumber through so DEX layer never fetches it independently
             yield return FetchPriceUpdateAsync(dex, pair, currentBlockNumber, cancellationToken);
         }
     }
@@ -85,37 +86,23 @@ public sealed class ScannerService
         int currentBlockNumber,
         CancellationToken cancellationToken)
     {
-        if (!await IsDexHealthyAsync(dex, pair, cancellationToken))
-            return null;
-
-        return await FetchAndBuildPriceUpdateAsync(dex, pair, cancellationToken);
-    }
-
-    private async Task<bool> IsDexHealthyAsync(
-        IDex dex,
-        TokenPair pair,
-        CancellationToken cancellationToken)
-    {
-        var isHealthy = await dex.IsHealthyAsync(cancellationToken);
-
-        if (!isHealthy)
-            _logger.LogWarning(
-                "DEX {DexName} is unhealthy, skipping pair {TokenA}/{TokenB}",
-                dex.Name,
-                pair.TokenA,
-                pair.TokenB);
-
-        return isHealthy;
+        // Health check removed from hot path, if the DEX is down,
+        // GetReservesAsync throws BlockchainCommunicationException which
+        // is caught below. This saves one eth_blockNumber call per DEX per cycle.
+        return await FetchAndBuildPriceUpdateAsync(dex, pair, currentBlockNumber, cancellationToken);
     }
 
     private async Task<PriceUpdate?> FetchAndBuildPriceUpdateAsync(
         IDex dex,
         TokenPair pair,
+        int currentBlockNumber,
         CancellationToken cancellationToken)
     {
         try
         {
-            var reserves = await dex.GetReservesAsync(pair, cancellationToken);
+            // Pass currentBlockNumber, DEX layer stores it on PoolReserves
+            // without making an additional RPC call to fetch it
+            var reserves = await dex.GetReservesAsync(pair, currentBlockNumber, cancellationToken);
             var priceUpdate = BuildPriceUpdate(dex, pair, reserves);
             LogPriceUpdate(priceUpdate);
             return priceUpdate;
@@ -182,6 +169,8 @@ public sealed class ScannerService
         IEnumerable<Task<PriceUpdate?>> tasks,
         CancellationToken cancellationToken)
     {
+        // Cap concurrent RPC calls to avoid rate limiting on the free tier.
+        // Without this, all tasks fire simultaneously, too many requests per second.
         var semaphore = new SemaphoreSlim(_options.MaxConcurrentDexCalls);
         var results = new List<PriceUpdate?>();
 

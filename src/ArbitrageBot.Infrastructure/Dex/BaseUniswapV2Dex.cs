@@ -16,7 +16,7 @@ public abstract class BaseUniswapV2Dex : IDex
     protected readonly ILogger Logger;
 
     // Minimal ABI for the Uniswap V2 pair contract.
-    // I am only define getReserves because that is the only function we call.
+    // We only define getReserves because that is the only function we call.
     // Defining the full ABI would add hundreds of lines for no benefit.
     private const string PairAbi = """
         [
@@ -79,15 +79,17 @@ public abstract class BaseUniswapV2Dex : IDex
         FactoryAddress = factoryAddress.ToLowerInvariant();
     }
 
+    // blockNumber is passed in from the worker — we must not fetch it here
+    // as that would add an extra eth_blockNumber RPC call per DEX per cycle
     public async Task<PoolReserves> GetReservesAsync(
         TokenPair pair,
+        int blockNumber,
         CancellationToken cancellationToken = default)
     {
         try
         {
             var pairAddress = await GetPairAddressAsync(pair, cancellationToken);
             var reserves = await FetchReservesFromChainAsync(pairAddress, cancellationToken);
-            var blockNumber = await GetCurrentBlockNumberAsync(cancellationToken);
 
             LogReservesFetched(pair, reserves.reserve0, reserves.reserve1, blockNumber);
 
@@ -116,7 +118,8 @@ public abstract class BaseUniswapV2Dex : IDex
     {
         // Reuse GetReservesAsync to avoid a separate RPC call.
         // SpotPrice is computed locally from reserves — no extra network round trip.
-        var reserves = await GetReservesAsync(pair, cancellationToken);
+        // Block number is not meaningful here so we pass 0.
+        var reserves = await GetReservesAsync(pair, 0, cancellationToken);
         return reserves.SpotPrice(pair.DecimalsA, pair.DecimalsB);
     }
 
@@ -126,7 +129,7 @@ public abstract class BaseUniswapV2Dex : IDex
         CancellationToken cancellationToken = default)
     {
         // Same pattern as GetSpotPriceAsync — one RPC call, math done locally
-        var reserves = await GetReservesAsync(pair, cancellationToken);
+        var reserves = await GetReservesAsync(pair, 0, cancellationToken);
         return reserves.GetAmountOut(amountIn, pair.DecimalsA, pair.DecimalsB);
     }
 
@@ -138,6 +141,8 @@ public abstract class BaseUniswapV2Dex : IDex
             // A successful block number fetch proves the RPC node is reachable.
             // We do not call getReserves here — that would require a token pair
             // and health checks should have no dependency on specific pairs.
+            // IsHealthyAsync is the only place we fetch block number independently
+            // because it runs on a slower interval outside the scan hot path.
             var blockNumber = await GetCurrentBlockNumberAsync(cancellationToken);
             return blockNumber > 0;
         }
@@ -179,6 +184,7 @@ public abstract class BaseUniswapV2Dex : IDex
         return (result.Reserve0, result.Reserve1);
     }
 
+    // Only used by IsHealthyAsync — not in the scan hot path
     private async Task<int> GetCurrentBlockNumberAsync(
         CancellationToken cancellationToken)
     {
@@ -241,8 +247,8 @@ public abstract class BaseUniswapV2Dex : IDex
     }
 
     // Nethereum deserializes contract outputs into a class.
-    // Nethereum also requires [FunctionOutput] on the class itself in addition to [Parameter] on each property — without it the deserializer refuses to decode [Nethereum.Contracts.FunctionOutput]
-    // Parameter attributes map each output by Solidity type, name, and position.
+    // [FunctionOutput] is required on the class itself — without it the
+    // deserializer refuses to decode regardless of [Parameter] attributes.
     // This class is private — nothing outside this file needs to know
     // how Uniswap V2 encodes its reserve data on-chain.
     [Nethereum.ABI.FunctionEncoding.Attributes.FunctionOutput]
