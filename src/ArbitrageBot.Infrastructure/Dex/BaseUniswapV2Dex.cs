@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
@@ -14,6 +15,12 @@ public abstract class BaseUniswapV2Dex : IDex
 {
     private readonly IWeb3 _web3;
     protected readonly ILogger Logger;
+
+    // Cache pair addresses after first resolution — pool addresses never change
+    // on a deployed DEX. This halves our RPC calls per cycle after warmup.
+    // First cycle: getPair + getReserves = 2 calls per pair.
+    // Every subsequent cycle: getReserves only = 1 call per pair.
+    private readonly ConcurrentDictionary<string, string> _pairAddressCache = new();
 
     // Minimal ABI for the Uniswap V2 pair contract.
     // We only define getReserves because that is the only function we call.
@@ -157,6 +164,21 @@ public abstract class BaseUniswapV2Dex : IDex
         TokenPair pair,
         CancellationToken cancellationToken)
     {
+        var cacheKey = BuildPairCacheKey(pair);
+
+        // Return cached address if we already resolved this pair.
+        // Pool addresses are immutable on-chain — safe to cache forever.
+        if (_pairAddressCache.TryGetValue(cacheKey, out var cachedAddress))
+        {
+            Logger.LogDebug(
+                "Using cached pair address for {TokenA}/{TokenB}: {Address}",
+                pair.TokenA,
+                pair.TokenB,
+                cachedAddress);
+            return cachedAddress;
+        }
+
+        // Cache miss — fetch from chain and store for future cycles
         var factoryContract = _web3.Eth.GetContract(FactoryAbi, FactoryAddress);
         var getPairFunction = factoryContract.GetFunction("getPair");
 
@@ -166,7 +188,28 @@ public abstract class BaseUniswapV2Dex : IDex
 
         ValidatePairAddress(pairAddress, pair);
 
-        return pairAddress.ToLowerInvariant();
+        var normalizedAddress = pairAddress.ToLowerInvariant();
+
+        // Store in cache — all future cycles skip this RPC call entirely
+        _pairAddressCache.TryAdd(cacheKey, normalizedAddress);
+
+        Logger.LogInformation(
+            "Resolved and cached pair address for {TokenA}/{TokenB} on {DexName}: {Address}",
+            pair.TokenA,
+            pair.TokenB,
+            Name,
+            normalizedAddress);
+
+        return normalizedAddress;
+    }
+
+    private static string BuildPairCacheKey(TokenPair pair)
+    {
+        // Sort addresses so the key is identical regardless of token order.
+        // WETH/USDC and USDC/WETH must resolve to the same pool address.
+        var addresses = new[] { pair.TokenA, pair.TokenB };
+        Array.Sort(addresses, StringComparer.OrdinalIgnoreCase);
+        return $"{addresses[0]}-{addresses[1]}";
     }
 
     private async Task<(BigInteger reserve0, BigInteger reserve1)> FetchReservesFromChainAsync(
