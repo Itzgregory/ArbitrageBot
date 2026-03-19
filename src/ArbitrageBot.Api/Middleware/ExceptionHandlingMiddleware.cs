@@ -33,9 +33,9 @@ public sealed class ExceptionHandlingMiddleware
         }
     }
 
-    private async Task HandleDomainExceptionAsync(
-        HttpContext context,
-        ArbitrageBotException ex)
+   private async Task HandleDomainExceptionAsync(
+    HttpContext context,
+    ArbitrageBotException ex)
     {
         _logger.LogWarning(ex,
             "Domain exception {ErrorCode} on {Method} {Path}",
@@ -43,7 +43,12 @@ public sealed class ExceptionHandlingMiddleware
             context.Request.Method,
             context.Request.Path);
 
-        await WriteResponseAsync(context, HttpStatusCode.UnprocessableEntity, ex.ErrorCode, ex.Message);
+        await WriteResponseAsync(
+            context,
+            HttpStatusCode.UnprocessableEntity,
+            ex.ErrorCode,
+            ex.Message,
+            context.TraceIdentifier);
     }
 
     private async Task HandleUnexpectedExceptionAsync(
@@ -55,20 +60,25 @@ public sealed class ExceptionHandlingMiddleware
             context.Request.Method,
             context.Request.Path);
 
-        await WriteResponseAsync(context, HttpStatusCode.InternalServerError,
-            "INTERNAL_ERROR", "An unexpected error occurred");
+        await WriteResponseAsync(
+            context,
+            HttpStatusCode.InternalServerError,
+            "INTERNAL_ERROR",
+            "An unexpected error occurred",
+            context.TraceIdentifier);
     }
 
     private static async Task WriteResponseAsync(
         HttpContext context,
         HttpStatusCode statusCode,
         string errorCode,
-        string detail)
+        string detail,
+        string? correlationId = null)
     {
         context.Response.StatusCode = (int)statusCode;
         context.Response.ContentType = "application/json";
 
-        var response = ApiResponse<object>.Fail((int)statusCode, detail);
+        var response = ApiResponse<object>.Fail((int)statusCode, detail, correlationId);
 
         await context.Response.WriteAsJsonAsync(response);
     }

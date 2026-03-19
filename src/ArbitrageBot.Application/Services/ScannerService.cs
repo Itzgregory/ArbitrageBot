@@ -20,7 +20,12 @@ public sealed class ScannerService
     private readonly ILogger<ScannerService> _logger;
 
     public ScannerService(
+        // the scanner will monitor multiple dexes simultaneously
+        // injecting a collections means that i will add or remove dex implementations in programs.cs without touching the scanner at all
         IEnumerable<IDex> dexes,
+        // this is the list of pairs to watch...
+        // this comes from configuration
+        // i dont hardcode pairs in scanner... in program.cs i will register from appsettings.json
         IEnumerable<TokenPair> monitoredPairs,
         IOptions<ScannerOptions> options,
         ILogger<ScannerService> logger)

@@ -55,11 +55,11 @@ public sealed record PoolReserves : IStale, ITimestamped
     {
         if (Reserve0 == 0)
             throw new InvalidTokenPairException("Reserve0 is zero — cannot calculate spot price");
-
-        var adjustedReserve0 = Reserve0 / (decimal)Math.Pow(10, decimalsToken0);
-        var adjustedReserve1 = Reserve1 / (decimal)Math.Pow(10, decimalsToken1);
-
-        return adjustedReserve1 / adjustedReserve0;
+       
+       
+        // Reserves are already adjusted for decimals by ConvertFromWei in the DEX layer.
+        // We divide directly — no further decimal adjustment needed here.
+        return Reserve1 / Reserve0;
     }
 
     // this is the Uniswap V2 constant product formula with the 0.3% fee applied. 
@@ -73,12 +73,11 @@ public sealed record PoolReserves : IStale, ITimestamped
         if (amountIn <= 0)
             throw new InvalidTokenPairException($"AmountIn must be positive, got {amountIn}");
 
-        var adjustedReserve0 = Reserve0 / (decimal)Math.Pow(10, decimalsIn);
-        var adjustedReserve1 = Reserve1 / (decimal)Math.Pow(10, decimalsOut);
-
+        // Reserves are already in human-readable form — apply Uniswap V2 formula directly.
+        // The 997/1000 factor represents the 0.3% swap fee.
         var amountInWithFee = amountIn * 997m;
-        var numerator = amountInWithFee * adjustedReserve1;
-        var denominator = adjustedReserve0 * 1000m + amountInWithFee;
+        var numerator = amountInWithFee * Reserve1;
+        var denominator = Reserve0 * 1000m + amountInWithFee;
 
         return numerator / denominator;
     }
