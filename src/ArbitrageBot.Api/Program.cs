@@ -17,6 +17,8 @@ using Serilog.Events;
 if (File.Exists(".env"))
     DotNetEnv.Env.Load();
 
+// Console.WriteLine($"DEBUG: {Environment.GetEnvironmentVariable("DEXES__UNISWAPV2__ROUTERADDRESS")}");
+
 // Bootstrap logger — starts immediately before DI is available.
 // Captures startup failures that would otherwise be silent.
 Log.Logger = new LoggerConfiguration()

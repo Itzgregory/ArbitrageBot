@@ -7,6 +7,7 @@ using ArbitrageBot.Domain.Interfaces;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Nethereum.Web3;
 
 namespace ArbitrageBot.Api.Workers;
 
@@ -16,6 +17,7 @@ public sealed class ArbitrageBotWorker : BackgroundService
     private readonly AnalyzerService _analyzer;
     private readonly ExecutorService _executor;
     private readonly IStorageProvider _storage;
+    private readonly IWeb3 _web3;
     private readonly ScannerOptions _options;
     private readonly ILogger<ArbitrageBotWorker> _logger;
 
@@ -24,6 +26,7 @@ public sealed class ArbitrageBotWorker : BackgroundService
         AnalyzerService analyzer,
         ExecutorService executor,
         IStorageProvider storage,
+        IWeb3 web3,
         IOptions<ScannerOptions> options,
         ILogger<ArbitrageBotWorker> logger)
     {
@@ -31,6 +34,7 @@ public sealed class ArbitrageBotWorker : BackgroundService
         _analyzer = analyzer ?? throw new ArgumentNullException(nameof(analyzer));
         _executor = executor ?? throw new ArgumentNullException(nameof(executor));
         _storage = storage ?? throw new ArgumentNullException(nameof(storage));
+        _web3 = web3 ?? throw new ArgumentNullException(nameof(web3));
         _options = options?.Value ?? throw new ArgumentNullException(nameof(options));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
@@ -110,10 +114,26 @@ public sealed class ArbitrageBotWorker : BackgroundService
 
     private async Task<int> GetCurrentBlockNumberAsync(CancellationToken stoppingToken)
     {
-        // Placeholder — in production this reads from the blockchain gateway.
-        // For now we return 0 so the scanner can still run without a live node.
-        await Task.CompletedTask;
-        return 0;
+        try
+        {
+            // Read the actual current block number from the blockchain.
+            // This is passed to the scanner so price updates carry the correct
+            // block number for staleness checks — not fetched per DEX per cycle.
+            var blockNumber = await _web3.Eth.Blocks.GetBlockNumber.SendRequestAsync();
+            var current = (int)blockNumber.Value;
+
+            _logger.LogDebug("Current block number: {BlockNumber}", current);
+
+            return current;
+        }
+        catch (Exception ex)
+        {
+            // If the block number fetch fails, log and return 0.
+            // The scanner still runs but staleness checks are degraded.
+            // This is preferable to stopping the entire cycle on a transient error.
+            _logger.LogWarning(ex, "Failed to fetch current block number, defaulting to 0");
+            return 0;
+        }
     }
 
     private async Task WaitForNextCycleAsync(CancellationToken stoppingToken)

@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using ArbitrageBot.Application.Configuration;
 using ArbitrageBot.Domain.Interfaces;
 using ArbitrageBot.Domain.Models;
+using ArbitrageBot.Domain.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -16,6 +17,12 @@ public sealed class AnalyzerService
     private readonly IEnumerable<IFlashLoanProvider> _flashLoanProviders;
     private readonly ScannerOptions _options;
     private readonly ILogger<AnalyzerService> _logger;
+
+    // Maximum flash loan size in ETH equivalent.
+    // Larger trades cause more price impact, reducing or eliminating profit.
+    // 10 ETH is conservative — enough to capture meaningful profit without
+    // moving the market significantly on large pools.
+    private const decimal MaxFlashLoanEth = 10m;
 
     public AnalyzerService(
         IEnumerable<IFlashLoanProvider> flashLoanProviders,
@@ -42,7 +49,10 @@ public sealed class AnalyzerService
             "Analyzing {Count} price updates for arbitrage opportunities",
             priceUpdates.Count);
 
-        var opportunities = await FindOpportunitiesAsync(priceUpdates, currentBlockNumber, cancellationToken);
+        var opportunities = await FindOpportunitiesAsync(
+            priceUpdates,
+            currentBlockNumber,
+            cancellationToken);
 
         _logger.LogInformation(
             "Analysis complete. Found {Count} profitable opportunities",
@@ -72,7 +82,10 @@ public sealed class AnalyzerService
 
         foreach (var group in pairGroups)
         {
-            var found = await AnalyzePairGroupAsync(group, currentBlockNumber, cancellationToken);
+            var found = await AnalyzePairGroupAsync(
+                group,
+                currentBlockNumber,
+                cancellationToken);
             opportunities.AddRange(found);
         }
 
@@ -124,9 +137,40 @@ public sealed class AnalyzerService
 
         var (buyUpdate, sellUpdate) = DetermineBuySellSides(updateA, updateB, priceDiff);
 
+        // Calculate optimal trade size accounting for price impact on both legs
+        var flashLoanAmount = CalculateOptimalTradeSize(buyUpdate, sellUpdate);
+
+        if (flashLoanAmount <= 0)
+        {
+            _logger.LogDebug(
+                "No profitable trade size found for {TokenA}/{TokenB}",
+                buyUpdate.Pair.TokenA,
+                buyUpdate.Pair.TokenB);
+            return null;
+        }
+
+        // Verify gross profit before checking flash loan availability
+        // — avoids unnecessary RPC calls for clearly unprofitable opportunities
+        var grossProfit = OptimalTradeCalculator.CalculateGrossProfit(
+            flashLoanAmount,
+            buyUpdate.Reserve0,
+            buyUpdate.Reserve1,
+            sellUpdate.Reserve0,
+            sellUpdate.Reserve1);
+
+        if (grossProfit <= 0)
+        {
+            _logger.LogDebug(
+                "Gross profit negative for {TokenA}/{TokenB} at optimal size {Size}",
+                buyUpdate.Pair.TokenA,
+                buyUpdate.Pair.TokenB,
+                flashLoanAmount);
+            return null;
+        }
+
         var provider = await SelectFlashLoanProviderAsync(
             buyUpdate.Pair.TokenA,
-            buyUpdate.Reserve0,
+            flashLoanAmount,
             cancellationToken);
 
         if (provider is null)
@@ -135,9 +179,8 @@ public sealed class AnalyzerService
             return null;
         }
 
-        return BuildOpportunity(buyUpdate, sellUpdate, provider, priceDiff);
+        return BuildOpportunity(buyUpdate, sellUpdate, provider, flashLoanAmount, priceDiff);
     }
-
     private bool IsPriceDiffSufficient(decimal priceDiff, PriceUpdate update)
     {
         if (Math.Abs(priceDiff) < _options.MinimumProfitThreshold)
@@ -164,6 +207,29 @@ public sealed class AnalyzerService
             : (updateB, updateA);
     }
 
+    private decimal CalculateOptimalTradeSize(
+        PriceUpdate buyUpdate,
+        PriceUpdate sellUpdate)
+    {
+        // Calculate the mathematically optimal trade size that maximises
+        // net profit after price impact on both legs.
+        // This prevents both overflow and profit-destroying over-sizing.
+        var optimal = OptimalTradeCalculator.CalculateOptimalTradeSize(
+            buyUpdate.Reserve0,
+            buyUpdate.Reserve1,
+            sellUpdate.Reserve0,
+            sellUpdate.Reserve1,
+            MaxFlashLoanEth);
+
+        _logger.LogDebug(
+            "Optimal trade size for {TokenA}/{TokenB}: {OptimalSize}",
+            buyUpdate.Pair.TokenA,
+            buyUpdate.Pair.TokenB,
+            optimal);
+
+        return optimal;
+    }
+
     private void LogNoProviderAvailable(PriceUpdate buyUpdate)
     {
         _logger.LogWarning(
@@ -176,9 +242,9 @@ public sealed class AnalyzerService
         PriceUpdate buyUpdate,
         PriceUpdate sellUpdate,
         IFlashLoanProvider provider,
+        decimal flashLoanAmount,
         decimal priceDiff)
     {
-        var flashLoanAmount = buyUpdate.Reserve0 * 0.1m;
         var buyAmountOut = CalculateAmountOut(buyUpdate, flashLoanAmount);
 
         if (buyAmountOut <= 0)
@@ -261,14 +327,30 @@ public sealed class AnalyzerService
                     tokenAddress,
                     cancellationToken);
 
+                _logger.LogDebug(
+                    "Provider {Provider} has {Available} liquidity for {Token}, need {Required}",
+                    provider.Name,
+                    available,
+                    tokenAddress,
+                    requiredAmount);
+
                 if (available >= requiredAmount)
                     return provider;
+
+                _logger.LogWarning(
+                    "Provider {Provider} has insufficient liquidity for {Token}. " +
+                    "Available: {Available}, Required: {Required}",
+                    provider.Name,
+                    available,
+                    tokenAddress,
+                    requiredAmount);
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex,
-                    "Failed to check liquidity on provider {Provider}",
-                    provider.Name);
+                    "Failed to check liquidity on provider {Provider} for {Token}",
+                    provider.Name,
+                    tokenAddress);
             }
         }
 
@@ -280,15 +362,25 @@ public sealed class AnalyzerService
         if (update.Reserve0 <= 0 || update.Reserve1 <= 0)
             return 0m;
 
-        var amountInWithFee = amountIn * 997m;
-        var numerator = amountInWithFee * update.Reserve1;
-        var denominator = update.Reserve0 * 1000m + amountInWithFee;
+        // Use double for intermediate calculations to avoid decimal overflow.
+        // Reserve values are human-readable after ConvertFromWei but multiplying
+        // large reserves by large amounts still overflows decimal's range.
+        // We convert back to decimal only at the final result.
+        var reserve0 = (double)update.Reserve0;
+        var reserve1 = (double)update.Reserve1;
+        var amount = (double)amountIn;
 
-        return numerator / denominator;
+        var amountInWithFee = amount * 997.0;
+        var numerator = amountInWithFee * reserve1;
+        var denominator = reserve0 * 1000.0 + amountInWithFee;
+
+        return (decimal)(numerator / denominator);
     }
 
     private static decimal EstimateGasCost()
     {
+        // 200,000 gas units at 30 gwei — conservative estimate for a flash loan arb.
+        // In production this reads live gas price from the blockchain.
         const decimal averageGasUnits = 200_000m;
         const decimal gasPriceGwei = 30m;
         const decimal gweiToEth = 0.000_000_001m;

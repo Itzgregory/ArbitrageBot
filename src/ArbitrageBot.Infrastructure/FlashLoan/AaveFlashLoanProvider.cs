@@ -1,4 +1,5 @@
 using System;
+using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
 using ArbitrageBot.Domain.Exceptions;
@@ -62,6 +63,39 @@ public sealed class AaveFlashLoanProvider : IFlashLoanProvider
             }
         ]
         """;
+
+    // Minimal ERC-20 ABI — we only need balanceOf to check available liquidity.
+    // The aToken contract implements ERC-20 so this works for any asset.
+    private const string Erc20Abi = """
+    [
+        {
+            "name": "balanceOf",
+            "type": "function",
+            "inputs": [
+                { "name": "account", "type": "address" }
+            ],
+            "outputs": [
+                { "name": "", "type": "uint256" }
+            ]
+        },
+        {
+            "name": "decimals",
+            "type": "function",
+            "inputs": [],
+            "outputs": [
+                { "name": "", "type": "uint8" }
+            ]
+        },
+        {
+            "name": "totalSupply",
+            "type": "function",
+            "inputs": [],
+            "outputs": [
+                { "name": "", "type": "uint256" }
+            ]
+        }
+    ]
+    """;
 
     public AaveFlashLoanProvider(
         IWeb3 web3,
@@ -178,20 +212,45 @@ public sealed class AaveFlashLoanProvider : IFlashLoanProvider
         string tokenAddress,
         CancellationToken cancellationToken)
     {
+        // Step 1 — get the aToken address from Aave's reserve data.
+        // The aToken's total supply represents the total deposited liquidity
+        // available for flash loans.
         var poolContract = _web3.Eth.GetContract(PoolAbi, _poolAddress);
         var getReserveDataFunction = poolContract.GetFunction("getReserveData");
 
-        var result = await getReserveDataFunction
+        var reserveData = await getReserveDataFunction
             .CallDeserializingToObjectAsync<ReserveDataOutput>(tokenAddress);
 
-        // aTokenAddress holds the pool's liquidity for this asset.
-        // We fetch its token balance to get available liquidity.
-        var aTokenBalance = await _web3.Eth.GetBalance
-            .SendRequestAsync(result.ATokenAddress);
+        var aTokenAddress = reserveData.ATokenAddress;
 
-        // Convert from wei to decimal — assume 18 decimals for ETH-based assets.
-        // For production this should read decimals from the token contract.
-        return (decimal)aTokenBalance.Value / (decimal)Math.Pow(10, 18);
+        if (string.IsNullOrWhiteSpace(aTokenAddress))
+            throw new BlockchainCommunicationException(
+                $"Aave returned empty aToken address for {tokenAddress}",
+                new Exception("Empty aToken address"));
+
+        // Step 2 — read token decimals for correct conversion
+        var tokenContract = _web3.Eth.GetContract(Erc20Abi, tokenAddress);
+        var decimalsFunction = tokenContract.GetFunction("decimals");
+        var decimals = await decimalsFunction.CallAsync<int>();
+
+        // Step 3 — read the total supply of the aToken.
+        // aToken total supply = total deposited liquidity = available flash loan amount.
+        // This is more accurate than reading the pool's token balance because
+        // Aave routes liquidity through the aToken system, not held directly.
+        var aTokenContract = _web3.Eth.GetContract(Erc20Abi, aTokenAddress);
+        var totalSupplyFunction = aTokenContract.GetFunction("totalSupply");
+        var rawTotalSupply = await totalSupplyFunction.CallAsync<System.Numerics.BigInteger>();
+
+        var liquidity = (decimal)rawTotalSupply / (decimal)Math.Pow(10, decimals);
+
+        _logger.LogDebug(
+            "{Provider} available liquidity for {Token}: {Liquidity} (aToken: {AToken})",
+            Name,
+            tokenAddress,
+            liquidity,
+            aTokenAddress);
+
+        return liquidity;
     }
 
     private static byte[] EncodeOpportunityParams(ArbitrageOpportunity opportunity)
@@ -202,12 +261,12 @@ public sealed class AaveFlashLoanProvider : IFlashLoanProvider
         return System.Text.Encoding.UTF8.GetBytes(opportunity.Id);
     }
 
-    private static System.Numerics.BigInteger ConvertToWei(decimal amount)
+    private static BigInteger ConvertToWei(decimal amount)
     {
         // Convert human-readable decimal back to wei for the contract call.
         // We multiply by 10^18 because Aave expects amounts in the token's
         // smallest unit — the inverse of ConvertFromWei in the DEX layer.
-        return new System.Numerics.BigInteger(amount * (decimal)Math.Pow(10, 18));
+        return new BigInteger(amount * (decimal)Math.Pow(10, 18));
     }
 
     private static FlashLoanReceipt BuildReceipt(
@@ -252,17 +311,19 @@ public sealed class AaveFlashLoanProvider : IFlashLoanProvider
     }
 
     // Nethereum deserializes the getReserveData return values into this class.
-    // We only use ATokenAddress — the rest are included to satisfy
-    // the full ABI output mapping but are otherwise ignored.
+    // We only map the fields we actually use — configuration and liquidityIndex
+    // are included to keep position mapping correct for aTokenAddress at position 9.
     [Nethereum.ABI.FunctionEncoding.Attributes.FunctionOutput]
     private sealed class ReserveDataOutput
     {
         [Nethereum.ABI.FunctionEncoding.Attributes.Parameter("uint256", "configuration", 1)]
-        public System.Numerics.BigInteger Configuration { get; set; }
+        public BigInteger Configuration { get; set; }
 
         [Nethereum.ABI.FunctionEncoding.Attributes.Parameter("uint128", "liquidityIndex", 2)]
-        public System.Numerics.BigInteger LiquidityIndex { get; set; }
+        public BigInteger LiquidityIndex { get; set; }
 
+        // aTokenAddress is at position 9 in the ABI output.
+        // It holds the address of the interest-bearing token for this asset.
         [Nethereum.ABI.FunctionEncoding.Attributes.Parameter("address", "aTokenAddress", 9)]
         public string ATokenAddress { get; set; } = string.Empty;
     }
